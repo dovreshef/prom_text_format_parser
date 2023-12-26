@@ -1,0 +1,2 @@
+# HELP http_requests_total The total number of HTTP requests.
+# TYPE http_requests_total counter

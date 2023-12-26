@@ -1,0 +1,29 @@
+[package]
+name = "prom_text_format_parser"
+version = "0.1.0"
+edition = "2021"
+authors = ["Dov Reshef <reshef.dov@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "A crate to parse and print Prometheus exposition text format"
+readme = "README.md"
+keywords = ["prometheus"]
+categories = ["parsing"]
+documentation = "https://docs.rs/prom_text_format_parser"
+repository = "https://github.com/dovreshef/prom_text_format_parser"
+exclude = [
+    ".github/**/*",
+    "test_data/**/*"
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+derive_more = "0.99"
+winnow = "0.5"
+strum = { version = "0.25", features = ["derive"] }
+
+[dev-dependencies]
+rstest = "0.18"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+pretty_assertions = "1.4"
