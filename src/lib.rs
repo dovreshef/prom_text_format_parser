@@ -417,7 +417,7 @@ pub mod tests {
 
     // Remove starting & trailing space from all lines.
     // Remove empty lines.
-    fn prepare_test_data(data: &str) -> String {
+    pub fn prepare_test_data(data: &str) -> String {
         data.lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty())
@@ -427,6 +427,8 @@ pub mod tests {
 
     #[test]
     fn test_add_label() {
+        init_test_logging();
+
         let input = r#"
             # HELP http_request_duration_seconds A histogram of the request duration.
             # TYPE http_request_duration_seconds histogram
@@ -464,6 +466,8 @@ pub mod tests {
 
     #[test]
     fn test_remove_label() {
+        init_test_logging();
+
         let input = r#"
             # HELP http_request_duration_seconds A histogram of the request duration.
             # TYPE http_request_duration_seconds histogram
@@ -497,5 +501,14 @@ pub mod tests {
         scrape.remove_label("three", "3");
         let output = format!("{scrape}");
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn validate_debug_is_set_transitively_on_everything() {
+        init_test_logging();
+
+        let data = PROMETHEUS_01;
+        let scrape = Scrape::parse(data).unwrap();
+        let _ = format!("{scrape:?}");
     }
 }

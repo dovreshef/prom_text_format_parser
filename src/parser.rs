@@ -289,7 +289,7 @@ pub struct MetricError {
     /// The line number where the error occurred
     pub line_no: Range<usize>,
     /// The error string
-    pub error: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, derive_more::Display)]
@@ -361,8 +361,8 @@ impl Iterator for MetricAssembler {
                 }
                 (MetricState::Help(prev_name), Some(Line::Help { name, desc })) => {
                     let err_msg = match prev_name == name {
-                        true => format!("Metric {prev_name} has two HELP sections"),
-                        false => format!("Metric {prev_name} has only HELP"),
+                        true => format!("Metric {prev_name} HELP section appeared multiple times"),
+                        false => format!("Metric {prev_name} has no samples"),
                     };
                     let location = self.current - 1..self.current;
                     let metric_err = MetricError::new(location, err_msg);
@@ -379,7 +379,7 @@ impl Iterator for MetricAssembler {
                             let location = self.current - 1..self.current;
                             let metric_err = MetricError::new(
                                 location,
-                                format!("Metric {prev_name} has only HELP"),
+                                format!("Metric {prev_name} has no samples"),
                             );
                             self.rewind(Line::Type { name, kind });
                             return Some(Err(metric_err));
@@ -388,8 +388,8 @@ impl Iterator for MetricAssembler {
                 }
                 (MetricState::Type(prev_name), Some(Line::Type { name, kind })) => {
                     let err_msg = match prev_name == name {
-                        true => format!("Metric {prev_name} has two TYPE sections"),
-                        false => format!("Metric {prev_name} has only TYPE"),
+                        true => format!("Metric {prev_name} TYPE section appeared multiple times"),
+                        false => format!("Metric {prev_name} has no samples"),
                     };
                     let location = self.current - 1..self.current;
                     let metric_err = MetricError::new(location, err_msg);
@@ -408,7 +408,7 @@ impl Iterator for MetricAssembler {
                             let location = self.current - 1..self.current;
                             let metric_err = MetricError::new(
                                 location,
-                                format!("Metric {prev_name} has only TYPE"),
+                                format!("Metric {prev_name} has no samples"),
                             );
                             self.rewind(Line::Help { name, desc });
                             return Some(Err(metric_err));
@@ -600,20 +600,25 @@ mod tests {
         name_parser,
         new_line_or_eof_parser,
         parse_label_value,
+        parse_scrape,
         rest_of_the_line_parser,
         sample_line_parser,
         scrape_lines_parser,
         type_line_parser,
         Line,
+        ScrapeParseError,
     };
     use crate::{
         tests::{
             init_test_logging,
+            prepare_test_data,
             EXAMPLE_01,
             NODE_EXPORTER_01,
             PROMETHEUS_01,
         },
+        Float,
         Type,
+        ValueType,
     };
     use pretty_assertions::assert_eq;
     use rstest::rstest;
@@ -687,7 +692,13 @@ mod tests {
             assert_eq!(key, recv_key);
             assert_eq!(val, recv_val);
         }
-        let error_cases = ["", r#"key1="Test"#, r#""key1"="Test""#];
+        let error_cases = [
+            "",
+            r#"key1="Test"#,
+            r#""key1"="Test""#,
+            "key1=",
+            r#"key1 "Test""#,
+        ];
         for expr in error_cases {
             info!("Testing failure expr: '{expr}'");
             assert!(label_key_value_parser.parse(expr).is_err());
@@ -999,11 +1010,217 @@ mod tests {
 
     #[rstest]
     fn test_scrape_parser(#[values(EXAMPLE_01, NODE_EXPORTER_01, PROMETHEUS_01)] data: &str) {
+        init_test_logging();
+
         let expected_len = data.lines().count();
         let lines = match scrape_lines_parser.parse(data) {
             Ok(lines) => lines,
             Err(e) => panic!("{e}"),
         };
         assert_eq!(lines.len(), expected_len);
+    }
+
+    #[test]
+    fn test_scrape_success_01() {
+        init_test_logging();
+
+        let input = r#"
+                # TYPE go_memstats_frees_total counter
+                # HELP go_memstats_frees_total Total number of frees.
+                go_memstats_frees_total 4.130418363e+09
+            "#;
+        let input = prepare_test_data(input);
+        let (mut metrics, maybe_error) = parse_scrape(&input);
+        assert!(maybe_error.is_none());
+        assert_eq!(metrics.len(), 1);
+        let metric = metrics.pop().unwrap();
+        assert_eq!(metric.kind, Type::Counter);
+        assert_eq!(metric.help_desc.as_deref(), Some("Total number of frees."));
+        assert_eq!(metric.name, "go_memstats_frees_total");
+        assert_eq!(
+            metric.samples[0].value.value,
+            Float("4.130418363e+09".into())
+        );
+    }
+
+    #[test]
+    fn test_scrape_parse_failure_01() {
+        init_test_logging();
+
+        let inputs = [
+            r#"
+                # HELP http_request_duration_seconds A histogram of the request duration.
+                # TYPE http_request_duration_seconds histogram
+            "#,
+            r#"
+                # TYPE http_request_duration_seconds histogram
+            "#,
+        ];
+        for input in inputs.iter().map(|i| prepare_test_data(i)) {
+            let (metrics, maybe_error) = parse_scrape(&input);
+            assert!(metrics.is_empty());
+            let ScrapeParseError::Collect(metric_errors) = maybe_error.unwrap() else {
+                panic!("expected metric errors");
+            };
+            assert_eq!(metric_errors.len(), 1);
+            assert_eq!(
+                metric_errors[0].reason,
+                "Metric http_request_duration_seconds has no samples"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scrape_parse_failure_02() {
+        init_test_logging();
+
+        let inputs = [
+            r#"
+                # TYPE http_request_duration_seconds histogram
+                # TYPE http_request_duration_seconds histogram
+            "#,
+            r#"
+                # HELP go_info Information about the Go environment.
+                # HELP go_info Information about the Go environment.
+            "#,
+        ];
+        let error_reasons = [
+            "Metric http_request_duration_seconds TYPE section appeared multiple times",
+            "Metric go_info HELP section appeared multiple times",
+        ];
+        for (input, reason) in inputs
+            .iter()
+            .map(|i| prepare_test_data(i))
+            .zip(error_reasons)
+        {
+            let (metrics, maybe_error) = parse_scrape(&input);
+            assert!(metrics.is_empty());
+            let ScrapeParseError::Collect(metric_errors) = maybe_error.unwrap() else {
+                panic!("expected metric errors");
+            };
+            assert_eq!(metric_errors.len(), 2);
+            assert_eq!(metric_errors[0].reason, reason);
+        }
+    }
+
+    #[test]
+    fn test_scrape_parse_failure_03() {
+        init_test_logging();
+
+        let inputs = [
+            r#"
+                # TYPE http_request_duration_seconds histogram
+                # TYPE http_request counter
+            "#,
+            r#"
+                # HELP go_info Information about the Go environment.
+                # HELP not_go_info No information about the Go environment.
+            "#,
+        ];
+        let error_reasons = [
+            (
+                "Metric http_request_duration_seconds has no samples",
+                "Metric http_request has no samples",
+            ),
+            (
+                "Metric go_info has no samples",
+                "Metric not_go_info has no samples",
+            ),
+        ];
+        for (input, reasons) in inputs
+            .iter()
+            .map(|i| prepare_test_data(i))
+            .zip(error_reasons)
+        {
+            let (metrics, maybe_error) = parse_scrape(&input);
+            assert!(metrics.is_empty());
+            let ScrapeParseError::Collect(metric_errors) = maybe_error.unwrap() else {
+                panic!("expected metric errors");
+            };
+            assert_eq!(metric_errors.len(), 2);
+            assert_eq!(metric_errors[0].reason, reasons.0);
+            assert_eq!(metric_errors[1].reason, reasons.1);
+        }
+    }
+
+    #[test]
+    fn test_scrape_parse_failure_04() {
+        init_test_logging();
+
+        let input = r#"
+            # HELP go_info Information about the Go environment.
+            # TYPE http_request counter
+        "#;
+        let input = prepare_test_data(input);
+        let (metrics, maybe_error) = parse_scrape(&input);
+        assert!(metrics.is_empty());
+        let ScrapeParseError::Collect(metric_errors) = maybe_error.unwrap() else {
+            panic!("expected metric errors");
+        };
+        assert_eq!(metric_errors.len(), 2);
+        assert_eq!(metric_errors[0].reason, "Metric go_info has no samples");
+        assert_eq!(
+            metric_errors[1].reason,
+            "Metric http_request has no samples"
+        );
+    }
+
+    #[test]
+    fn test_scrape_parse_failure_05() {
+        init_test_logging();
+
+        let input = r#"
+            # TYPE http_request counter
+            # HELP go_info Information about the Go environment.
+        "#;
+        let input = prepare_test_data(input);
+        let (metrics, maybe_error) = parse_scrape(&input);
+        assert!(metrics.is_empty());
+        let ScrapeParseError::Collect(metric_errors) = maybe_error.unwrap() else {
+            panic!("expected metric errors");
+        };
+        assert_eq!(metric_errors.len(), 2);
+        assert_eq!(
+            metric_errors[0].reason,
+            "Metric http_request has no samples"
+        );
+        assert_eq!(metric_errors[1].reason, "Metric go_info has no samples");
+    }
+
+    #[test]
+    fn test_scrape_parse_mix_01() {
+        init_test_logging();
+
+        let input = r#"
+                # HELP go_info Information about the Go environment.
+                go_info{version="go1.15.6"} 1
+                # TYPE go_memstats_alloc_bytes gauge
+            "#;
+        let input = prepare_test_data(input);
+
+        let (mut metrics, maybe_error) = parse_scrape(&input);
+        assert_eq!(metrics.len(), 1);
+        let mut metric = metrics.pop().unwrap();
+        assert_eq!(metric.name, "go_info");
+        assert_eq!(
+            metric.help_desc.as_deref(),
+            Some("Information about the Go environment.")
+        );
+        assert_eq!(metric.samples.len(), 1);
+        let sample = metric.samples.pop().unwrap();
+        assert_eq!(sample.value.value_type, ValueType::Sample);
+        assert_eq!(sample.value.value, Float("1".into()));
+        assert_eq!(sample.value.timestamp, None);
+        assert_eq!(sample.labels.len(), 1);
+        assert_eq!(sample.labels[0].key, "version");
+        assert_eq!(sample.labels[0].value, "go1.15.6");
+        let ScrapeParseError::Collect(metric_errors) = maybe_error.unwrap() else {
+            panic!("expected metric errors");
+        };
+        assert_eq!(metric_errors.len(), 1);
+        assert_eq!(
+            metric_errors[0].reason,
+            "Metric go_memstats_alloc_bytes has no samples"
+        );
     }
 }
